@@ -1,6 +1,8 @@
 import argparse
 import json
 from pathlib import Path
+import pickle
+import os
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -13,57 +15,9 @@ from prometheus_eval.prompts import ABSOLUTE_PROMPT, SCORE_RUBRIC_TEMPLATE
 from prometheus_eval.vllm import VLLM
 from transformers import AutoTokenizer
 
-flask_eval_prompt = {
-    "logical_correctness": """Score 1: The model’s final answer is completely incorrect and lacks sound reasoning.
-Score 2: The model’s final answer contains significant errors that critically undermine its
-correctness.
-Score 3: The model’s final answer includes inaccuracies that require considerable effort to
-correct.
-Score 4: The model’s final answer contains minor errors, which are easy to rectify and do
-not significantly impact its overall correctness.
-Score 5: The model’s final answer is completely accurate and sound.""",
-    "factuality": """Score 1: The model did not extract pertinent background knowledge and provided inaccurate
-or misleading information. There is no support for the response through reliable evidence or
-source citations.
-Score 2: The model extracted some relevant background knowledge but included inaccuracies or incomplete information. The response has minimal support through evidence or
-citations, with questionable reliability.
-Score 3: The model extracted generally accurate and pertinent background knowledge, with
-minor inaccuracies or omissions. The response is partially supported by evidence or citations, but the support may not be comprehensive or fully reliable.
-Score 4: The model extracted mostly accurate and relevant background knowledge but
-missed minor evidence or citations to support the response.
-Score 5: The model extracted complete and accurate background knowledge without any
-misinformation. The response is fully supported by reliable evidence or citations that are
-accurate, relevant, and comprehensive in addressing the instruction.""",
-    "comprehension": """Score 1: The response is completely unrelated to the instruction, or the model entirely misunderstands the instruction.
-Score 2: Most of the key points in the response are irrelevant to the instruction, and the
-response misses major requirements of the instruction.
-Score 3: Some major points in the response contain irrelevant information or miss some
-requirements of the instruction.
-Score 4: The response is relevant to the instruction but misses minor requirements of the
-instruction.
-Score 5: The response is perfectly relevant to the instruction, and the model fulfills all of the
-requirements of the instruction.""",
-    "completeness": """Score 1: The response doesn’t include any specifics or examples to support the statements
-made.
-Score 2: The response does not provide sufficient details or supportive examples, requiring
-a major effort to make the response more complete.
-Score 3: It is a decent response, but the breadth and depth of the response are rather limited.
-The details and examples used to substantiate the response may be insufficient.
-Score 4: The response provides detailed explanations, but there is room for enhancement.
-The response could be further improved by including more details and supportive examples.
-Score 5: The response fully provides comprehensive explanations. It delves deep into the
-topic, providing as much detail as possible, and it offers several examples to back up its
-points.""",
-    "insightfulness": """Score 1: The response is overly simplistic, lacking any originality or novelty.
-Score 2: The ideas or perspectives within the response are commonplace, demonstrating a
-lack of originality or novelty.
-Score 3: Some may perceive the response as original and novel, but others may find it
-ordinary or uninspiring.
-Score 4: The response includes some innovative perspectives or ideas that require thoughtful
-consideration, yet they aren’t particularly surprising.
-Score 5: The response is infused with surprisingly creative perspectives or ideas that are
-challenging to conceive, showcasing significant originality and novelty."""
-}
+with open("flask_prompt.pickle", "rb") as f:
+    flask_eval_prompt = pickle.load(f)
+    
 
 ABSOLLUTE_REFINE_PROMPT = """###Task Description:
 An instruction (might include an Input inside it), a response to evaluate, a reference answer that gets a score of 5, and a score rubric representing a evaluation criteria are given.
@@ -135,85 +89,85 @@ def main(args):
     records, instructions, responses, reference_answers, rubric = init_eval()
     records_2, instructions_2, responses_2, reference_answers_2, rubric_2 = init_eval()
 
-    for instance_id, instance in input_data.items():
-        record = instance
+    for flask_prompt in flask_eval_type:
+        for instance_id, instance in input_data.items():
+            record = instance
 
-        if "llm_judge" in record["id"]:
-            if is_prometheus:
-                continue
-            records_2.append(record)
-            instructions_2.append(record["input"])
-            responses_2.append(record["response"])
-            reference_answers_2.append(record["reference_answer"])
-            score_rubric = flask_eval_prompt[flask_eval_type]
-            rubric_2.append(score_rubric)
+            if "llm_judge" in record["id"]:
+                if is_prometheus:
+                    continue
+                records_2.append(record)
+                instructions_2.append(record["input"])
+                responses_2.append(record["response"])
+                reference_answers_2.append(record["reference_answer"])
+                score_rubric = flask_eval_prompt[flask_eval_type]
+                rubric_2.append(score_rubric)
+            else:
+                records.append(record)
+                instructions.append(record["input"])
+                responses.append(record["response"])
+                reference_answers.append(record["reference_answer"])
+                score_rubric = flask_eval_prompt[flask_eval_type]
+                rubric.append(score_rubric)
+
+        assert (
+            len(records)
+            == len(instructions)
+            == len(responses)
+            == len(reference_answers)
+            == len(rubric)
+        ), "Data mismatch"
+        assert (
+            len(records_2)
+            == len(instructions_2)
+            == len(responses_2)
+            == len(reference_answers_2)
+            == len(rubric_2)
+        ), "Data mismatch"
+
+        if is_prometheus:
+            model = VLLM(eval_model_name, gpu_memory_utilization=0.9, max_model_len=8192)
+            judge = PrometheusEval(model=model, absolute_grade_template=ABSOLUTE_PROMPT)
         else:
-            records.append(record)
-            instructions.append(record["input"])
-            responses.append(record["response"])
-            reference_answers.append(record["reference_answer"])
-            score_rubric = flask_eval_prompt[flask_eval_type]
-            rubric.append(score_rubric)
+            model = MockLLM(mode="absolute")
+            # model = AsyncLiteLLM(eval_model_name, batch_size=100, requests_per_minute=100)
+            judge = PrometheusEval(model=model, absolute_grade_template=ABSOLUTE_PROMPT)
 
-    assert (
-        len(records)
-        == len(instructions)
-        == len(responses)
-        == len(reference_answers)
-        == len(rubric)
-    ), "Data mismatch"
-    assert (
-        len(records_2)
-        == len(instructions_2)
-        == len(responses_2)
-        == len(reference_answers_2)
-        == len(rubric_2)
-    ), "Data mismatch"
-
-    if is_prometheus:
-        model = VLLM(eval_model_name, gpu_memory_utilization=0.9, max_model_len=8192)
-        judge = PrometheusEval(model=model, absolute_grade_template=ABSOLUTE_PROMPT)
-    else:
-        model = MockLLM(mode="absolute")
-        # model = AsyncLiteLLM(eval_model_name, batch_size=100, requests_per_minute=100)
-        judge = PrometheusEval(model=model, absolute_grade_template=ABSOLUTE_PROMPT)
-
-    feedbacks, scores = judge.absolute_grade(
-        instructions=instructions,
-        responses=responses,
-        rubric=rubric,
-        reference_answers=reference_answers,
-    )
-
-    if not is_prometheus:
-        judge.absolute_grade_prompt = ABSOLLUTE_REFINE_PROMPT
-        feedbacks_2, scores_2 = judge.absolute_grade(
-            instructions=instructions_2,
-            responses=responses_2,
-            rubric=rubric_2,
-            reference_answers=reference_answers_2,
+        feedbacks, scores = judge.absolute_grade(
+            instructions=instructions,
+            responses=responses,
+            rubric=rubric,
+            reference_answers=reference_answers,
         )
 
-        # Extend the feedbacks and scores
-        records.extend(records_2)
-        feedbacks.extend(feedbacks_2)
-        scores.extend(scores_2)
+        if not is_prometheus:
+            judge.absolute_grade_prompt = ABSOLLUTE_REFINE_PROMPT
+            feedbacks_2, scores_2 = judge.absolute_grade(
+                instructions=instructions_2,
+                responses=responses_2,
+                rubric=rubric_2,
+                reference_answers=reference_answers_2,
+            )
 
-    result = {}
+            # Extend the feedbacks and scores
+            records.extend(records_2)
+            feedbacks.extend(feedbacks_2)
+            scores.extend(scores_2)
 
-    for record, output in zip(records, zip(feedbacks, scores)):
-        instance_id = record["id"]
+        result = {}
 
-        result[instance_id] = record.copy()
-        result[instance_id]["feedback"] = output[0]
-        result[instance_id]["score"] = output[1]
-        result[instance_id]["eval_model_name"] = eval_model_name
+        for record, output in zip(records, zip(feedbacks, scores)):
+            instance_id = record["id"]
 
-    output_file_path = Path(output_file_path)
-    output_file_path.parent.mkdir(parents=True, exist_ok=True)
+            result[instance_id] = record.copy()
+            result[instance_id]["feedback"] = output[0]
+            result[instance_id]["score"] = output[1]
+            result[instance_id]["eval_model_name"] = eval_model_name
 
-    with output_file_path.open("w", encoding="utf-8") as file:
-        file.write(json.dumps(result, indent=4))
+        os.mkdir(output_file_path, exist_ok=True)
+
+        with open(output_file_path + f"/{flask_prompt}.json", "w", encoding="utf-8") as file:
+            json.dump(result, file, indent=4)
 
 
 if __name__ == "__main__":
@@ -226,8 +180,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--flask_eval_type",
-        type=str,
-        default="logical_correctness"
+        type=list,
+        default=["logical_correctness", "factuality", "comprehension", "completeness", "insightfulness"]
     )
     parser.add_argument(
         "--input_file_path",
