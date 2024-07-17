@@ -60,6 +60,28 @@ def apply_template_base(record):
     conv.append_message(conv.roles[1], None)
     return conv.get_prompt()
 
+def apply_template_arena(record):
+    urial_version = "inst_1k_v4"
+    
+    urial_prompt = URIAL_PROMPTS[urial_version]
+    
+    def map_to_conv(urial_version=None):
+        if "inst_help_v5" in urial_version:
+            conv = get_conv_template("urial_v5")
+        elif "inst_help_v6" in urial_version:
+            conv = get_conv_template("urial_v6")
+        else:
+            conv = get_conv_template("urial_backticks")
+        conv.set_system_message(urial_prompt)
+        return conv
+    
+    conv = map_to_conv(urial_version)
+    conv.append_message(
+        conv.roles[0], record["turns"]["content"]
+    )
+    conv.append_message(conv.roles[1], None)
+    return conv.get_prompt()
+
 
 def dummy_completions(inputs, **kwargs):
     return ["dummy output"] * len(inputs)
@@ -67,11 +89,17 @@ def dummy_completions(inputs, **kwargs):
 
 def main(args):
     model_name: str = args.model_name
+    task_type: str = args.task_type
     output_file_path: str = args.output_file_path
 
-    dataset: pd.DataFrame = load_dataset(
-        "prometheus-eval/BiGGen-Bench", split="test"
-    ).to_pandas()
+    if task_type == "biggen":
+        dataset: pd.DataFrame = load_dataset(
+            "prometheus-eval/BiGGen-Bench", split="test"
+        ).to_pandas()
+    elif task_type == "arena_hard":
+        dataset: pd.DataFrame = load_dataset(
+            "json", data_files="arena_hard.json", split="train"
+        ).to_pandas()
 
     # records: Full data that has all the information of BiGGen-Bench
     # inputs: Inputs that will be fed to the model
@@ -84,7 +112,10 @@ def main(args):
         if record["capability"] == "multilingual":
             continue
         records.append(record)
-        inputs.append(apply_template_base(record))
+        if task_type == "biggen":
+            inputs.append(apply_template_base(record))
+        elif task_type == "arena_hard":
+            inputs.append(apply_template_arena(record))
 
     params = {
         "max_tokens": 2048,
@@ -131,6 +162,11 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Name of the model to evaluate. Has to be a valid Hugging Face model name.",
+    )
+    parser.add_argument(
+        "--task_type",
+        type=str,
+        default="biggen"
     )
     parser.add_argument(
         "--output_file_path",

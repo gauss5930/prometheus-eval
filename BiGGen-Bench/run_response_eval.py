@@ -17,7 +17,6 @@ from transformers import AutoTokenizer
 
 with open("flask_prompt.pickle", "rb") as f:
     flask_eval_prompt = pickle.load(f)
-    
 
 ABSOLLUTE_REFINE_PROMPT = """###Task Description:
 An instruction (might include an Input inside it), a response to evaluate, a reference answer that gets a score of 5, and a score rubric representing a evaluation criteria are given.
@@ -65,6 +64,7 @@ def main(args):
     load_dotenv()
 
     input_file_path = args.input_file_path
+    task_type = args.task_type
     output_file_path = args.output_file_path
     eval_model_name = args.model_name
     flask_eval_type = args.flask_eval_type
@@ -89,7 +89,7 @@ def main(args):
     records, instructions, responses, reference_answers, rubric = init_eval()
     records_2, instructions_2, responses_2, reference_answers_2, rubric_2 = init_eval()
 
-    for flask_prompt in flask_eval_type:
+    if task_type == "biggen":
         for instance_id, instance in input_data.items():
             record = instance
 
@@ -100,14 +100,14 @@ def main(args):
                 instructions_2.append(record["input"])
                 responses_2.append(record["response"])
                 reference_answers_2.append(record["reference_answer"])
-                score_rubric = flask_eval_prompt[flask_eval_type]
+                score_rubric = SCORE_RUBRIC_TEMPLATE.format(**record["score_rubric"])
                 rubric_2.append(score_rubric)
             else:
                 records.append(record)
                 instructions.append(record["input"])
                 responses.append(record["response"])
                 reference_answers.append(record["reference_answer"])
-                score_rubric = flask_eval_prompt[flask_eval_type]
+                score_rubric = SCORE_RUBRIC_TEMPLATE.format(**record["score_rubric"])
                 rubric.append(score_rubric)
 
         assert (
@@ -164,10 +164,96 @@ def main(args):
             result[instance_id]["score"] = output[1]
             result[instance_id]["eval_model_name"] = eval_model_name
 
+        output_file_path = Path(output_file_path)
+        output_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+
         os.mkdir(output_file_path, exist_ok=True)
 
-        with open(output_file_path + f"/{flask_prompt}.json", "w", encoding="utf-8") as file:
+        with open(output_file_path + f"/biggen_result{eval_model_name.split('/')[-1]}.json", "w", encoding="utf-8") as file:
             json.dump(result, file, indent=4)
+
+            
+    elif task_type == "arena_hard":
+        for flask_prompt in flask_eval_type:
+            for instance_id, instance in input_data.items():
+                record = instance
+
+                if "llm_judge" in record["question_id"]:
+                    if is_prometheus:
+                        continue
+                    records_2.append(record)
+                    instructions_2.append(record["turns"]["content"])
+                    responses_2.append(record["response"])
+                    reference_answers_2.append(record["reference_answer"])
+                    score_rubric = SCORE_RUBRIC_TEMPLATE.format(**flask_eval_prompt[flask_prompt])
+                    rubric_2.append(score_rubric)
+                else:
+                    records.append(record)
+                    instructions.append(record["turns"]["content"])
+                    responses.append(record["response"])
+                    reference_answers.append(record["reference_answer"])
+                    score_rubric = SCORE_RUBRIC_TEMPLATE.format(**flask_eval_prompt[flask_prompt])
+                    rubric.append(score_rubric)
+
+            assert (
+                len(records)
+                == len(instructions)
+                == len(responses)
+                == len(reference_answers)
+                == len(rubric)
+            ), "Data mismatch"
+            assert (
+                len(records_2)
+                == len(instructions_2)
+                == len(responses_2)
+                == len(reference_answers_2)
+                == len(rubric_2)
+            ), "Data mismatch"
+
+            if is_prometheus:
+                model = VLLM(eval_model_name, gpu_memory_utilization=0.9, max_model_len=8192)
+                judge = PrometheusEval(model=model, absolute_grade_template=ABSOLUTE_PROMPT)
+            else:
+                model = MockLLM(mode="absolute")
+                # model = AsyncLiteLLM(eval_model_name, batch_size=100, requests_per_minute=100)
+                judge = PrometheusEval(model=model, absolute_grade_template=ABSOLUTE_PROMPT)
+
+            feedbacks, scores = judge.absolute_grade(
+                instructions=instructions,
+                responses=responses,
+                rubric=rubric,
+                reference_answers=reference_answers,
+            )
+
+            if not is_prometheus:
+                judge.absolute_grade_prompt = ABSOLLUTE_REFINE_PROMPT
+                feedbacks_2, scores_2 = judge.absolute_grade(
+                    instructions=instructions_2,
+                    responses=responses_2,
+                    rubric=rubric_2,
+                    reference_answers=reference_answers_2,
+                )
+
+                # Extend the feedbacks and scores
+                records.extend(records_2)
+                feedbacks.extend(feedbacks_2)
+                scores.extend(scores_2)
+
+            result = {}
+
+            for record, output in zip(records, zip(feedbacks, scores)):
+                instance_id = record["id"]
+
+                result[instance_id] = record.copy()
+                result[instance_id]["feedback"] = output[0]
+                result[instance_id]["score"] = output[1]
+                result[instance_id]["eval_model_name"] = eval_model_name
+
+            os.mkdir(output_file_path, exist_ok=True)
+
+            with open(output_file_path + f"/arena_hard_{flask_prompt}.json", "w", encoding="utf-8") as file:
+                json.dump(result, file, indent=4)
 
 
 if __name__ == "__main__":
@@ -179,9 +265,14 @@ if __name__ == "__main__":
         help="Model name to use as evaluation model",
     )
     parser.add_argument(
+        "--task_type",
+        type=str,
+        default="biggen"
+    )
+    parser.add_argument(
         "--flask_eval_type",
         type=list,
-        default=["logical_correctness", "factuality", "comprehension", "completeness", "insightfulness"]
+        default=["logical_robustness", "factuality", "commonsense_understanding", "comprehension", "insightfulness", "metacognition", "harmlessness"]
     )
     parser.add_argument(
         "--input_file_path",

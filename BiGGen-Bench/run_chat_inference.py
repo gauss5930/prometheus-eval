@@ -34,6 +34,25 @@ def apply_template_hf(tokenizer, record):
     )
     return input_str
 
+def apply_template_arena(tokenizer, record):
+    if tokenizer.chat_template is not None and "system" in tokenizer.chat_template:
+        messages = [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": record["turns"]["content"]},
+        ]
+    else:
+        messages = [
+            {
+                "role": "user",
+                "content": record["turns"]["content"],
+            }
+        ]
+
+    input_str = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    return input_str
+
 
 def dummy_completions(inputs, **kwargs):
     return ["dummy output"] * len(inputs)
@@ -41,12 +60,18 @@ def dummy_completions(inputs, **kwargs):
 
 def main(args):
     model_name: str = args.model_name
+    task_type: str = args.task_type
     output_file_path: str = args.output_file_path
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
-    dataset: pd.DataFrame = load_dataset(
-        "prometheus-eval/BiGGen-Bench", split="test"
-    ).to_pandas()
+    if task_type == "biggen":
+        dataset: pd.DataFrame = load_dataset(
+            "prometheus-eval/BiGGen-Bench", split="test"
+        ).to_pandas()
+    elif task_type == "arena_hard":
+        dataset: pd.DataFrame = load_dataset(
+            "json", data_files="arena_hard.json", split="train"
+        ).to_pandas()
 
     # records: Full data that has all the information of BiGGen-Bench
     # inputs: Inputs that will be fed to the model
@@ -56,7 +81,10 @@ def main(args):
     for row in dataset.iterrows():
         record = row[1]
         records.append(record.to_dict())
-        inputs.append(apply_template_hf(tokenizer, record))
+        if task_type == "biggen":
+            inputs.append(apply_template_hf(record))
+        elif task_type == "arena_hard":
+            inputs.append(apply_template_arena(record))
 
     params = {
         "max_tokens": 2048,
@@ -103,6 +131,11 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Name of the model to evaluate. Has to be a valid Hugging Face model name.",
+    )
+    parser.add_argument(
+        "--task_type",
+        type=str,
+        default="biggen"
     )
     parser.add_argument(
         "--output_file_path",

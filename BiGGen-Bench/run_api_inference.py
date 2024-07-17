@@ -29,6 +29,7 @@ def main(args):
     load_dotenv()
 
     model_name: str = args.model_name
+    task_type: str = args.task_type
     output_file_path: str = args.output_file_path
     batch_size: int = args.batch_size
     requests_per_minute: int = args.requests_per_minute
@@ -36,19 +37,28 @@ def main(args):
     model = AsyncLiteLLM(
         model_name, batch_size=batch_size, requests_per_minute=requests_per_minute
     )
-    dataset: pd.DataFrame = load_dataset(
-        "prometheus-eval/BiGGen-Bench", split="test"
-    ).to_pandas()
+    if task_type == "biggen":
+        dataset: pd.DataFrame = load_dataset(
+            "prometheus-eval/BiGGen-Bench", split="test"
+        ).to_pandas()
+    elif task_type == "arena_hard":
+        dataset: pd.DataFrame = load_dataset(
+            "json", data_files="arena_hard.json", split="train"
+        ).to_pandas()
 
     # records: Full data that has all the information of BiGGen-Bench
     # inputs: Inputs that will be fed to the model
     records = []
     inputs = []
-
+    
     for row in dataset.iterrows():
         record = row[1]
         records.append(record.to_dict())
-        inputs.append(apply_template_openai(record))
+        if task_type == "biggen":
+            inputs.append(apply_template_openai(record))
+        elif task_type == "arena_hard":
+            inputs.append([{"role": "user", "content": record["turns"]["content"]}])
+            
 
     params = {
         "max_tokens": 2048,
@@ -83,6 +93,11 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Name of the model to evaluate. Has to be a valid litellm model name.",
+    )
+    parser.add_argument(
+        "--task_type",
+        type=str,
+        default="biggen"
     )
     parser.add_argument(
         "--output_file_path",
